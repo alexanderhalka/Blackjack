@@ -1,15 +1,30 @@
 import cv2
 import numpy as np
-import pytesseract
 from PIL import Image
 import os
+import base64
+from io import BytesIO
+from openai import OpenAI
 from dotenv import load_dotenv
-import openai
 
+# Load environment variables from .env file
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Get API key from environment variable
+api_key = os.getenv('OPENAI_API_KEY')
+if not api_key:
+    raise ValueError("Please set your OpenAI API key in the .env file as OPENAI_API_KEY=your-key")
+
+def encode_image_to_base64(image):
+    # Convert PIL Image to base64
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 def analyze_webcam():
+    # Initialize OpenAI client with API key
+    client = OpenAI(api_key=api_key)
+    
     # Initialize webcam
     cap = cv2.VideoCapture(0)
     
@@ -20,29 +35,42 @@ def analyze_webcam():
             print("Failed to grab frame")
             break
             
-        # Convert frame to grayscale
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Apply thresholding to preprocess the image
-        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-        
-        # Convert the image to PIL format
-        pil_image = Image.fromarray(thresh)
+        # Convert frame to PIL Image
+        pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         
         try:
-            # Use pytesseract to do OCR on the image
-            text = pytesseract.image_to_string(pil_image, config='--psm 6 digits')
+            # Encode image to base64
+            base64_image = encode_image_to_base64(pil_image)
             
-            # Clean up the detected text
-            text = text.strip()
+            # Call OpenAI Vision API
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text", 
+                                "text": "Look at this image and identify if there is a playing card visible. If there is a card, respond with the card's value (2-10, J, Q, K, A) and suit (hearts, diamonds, clubs, spades) in the format 'value of suit' (e.g., '7 of hearts' or 'King of spades'). If no card is clearly visible, respond with 'No card detected'."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=20
+            )
             
-            if text and text.isdigit():
-                print(f"Detected number: {text}")
-            else:
-                print("No Number")
+            # Get the response
+            text = response.choices[0].message.content.strip()
+            print(f"Detected: {text}")
                 
         except Exception as e:
-            print("Error in OCR:", str(e))
+            print("Error in OpenAI API call:", str(e))
             
         # Display the frame
         cv2.imshow('Webcam Feed', frame)
