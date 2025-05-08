@@ -17,9 +17,9 @@ if not api_key:
     raise ValueError("Please set your OpenAI API key in the .env file as OPENAI_API_KEY=your-key")
 
 def encode_image_to_base64(image):
-    # Convert PIL Image to base64
+    # Convert PIL Image to base64 with JPEG compression (quality 80)
     buffered = BytesIO()
-    image.save(buffered, format="PNG")
+    image.save(buffered, format="JPEG", quality=80)
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
 def analyze_webcam():
@@ -33,6 +33,10 @@ def analyze_webcam():
     fps = 0
     frame_count = 0
     start_time = time.time()
+    
+    # Timer for sending frames every 2 seconds
+    last_sent_time = 0
+    send_interval = 2.0  # seconds
     
     while True:
         # Capture frame-by-frame
@@ -49,43 +53,48 @@ def analyze_webcam():
             frame_count = 0
             start_time = time.time()
             
-        # Convert frame to PIL Image
-        pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        # Resize frame to 480x360 for better detail
+        small_frame = cv2.resize(frame, (480, 360))
+        pil_image = Image.fromarray(cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB))
         
-        try:
-            # Encode image to base64
-            base64_image = encode_image_to_base64(pil_image)
-            
-            # Call OpenAI Vision API
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text", 
-                                "text": "Look at this image and identify if there is a playing card visible. If there is a card, respond with the card's value (2-10, J, Q, K, A) and suit (hearts, diamonds, clubs, spades) in the format 'value of suit' (e.g., '7 of hearts' or 'King of spades'). If no card is clearly visible, respond with 'No card detected'."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{base64_image}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=20
-            )
-            
-            # Get the response
-            text = response.choices[0].message.content.strip()
-            print(f"Detected: {text}")
+        # Send frame every 2 seconds
+        current_time = time.time()
+        if current_time - last_sent_time >= send_interval:
+            try:
+                # Encode image to base64 (JPEG)
+                base64_image = encode_image_to_base64(pil_image)
                 
-        except Exception as e:
-            print("Error in OpenAI API call:", str(e))
-            
+                # Call OpenAI Vision API
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text", 
+                                    "text": "Look at this image and identify if there is a playing card visible. If there is a card, respond with the card's value (2-10, J, Q, K, A) and suit (hearts, diamonds, clubs, spades) in the format 'value of suit' (e.g., '7 of hearts' or 'King of spades'). If no card is clearly visible, respond with 'No card detected'."
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=20
+                )
+                
+                # Get the response
+                text = response.choices[0].message.content.strip()
+                print(f"Detected: {text}")
+                last_sent_time = current_time
+                    
+            except Exception as e:
+                print("Error in OpenAI API call:", str(e))
+        
         # Add FPS text to the frame
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             
