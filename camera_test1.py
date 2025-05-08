@@ -6,6 +6,7 @@ import base64
 from io import BytesIO
 from openai import OpenAI
 from dotenv import load_dotenv
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,12 +29,25 @@ def analyze_webcam():
     # Initialize webcam
     cap = cv2.VideoCapture(0)
     
+    # Initialize FPS calculation variables
+    fps = 0
+    frame_count = 0
+    start_time = time.time()
+    
     while True:
         # Capture frame-by-frame
         ret, frame = cap.read()
         if not ret:
             print("Failed to grab frame")
             break
+            
+        # Calculate FPS
+        frame_count += 1
+        elapsed_time = time.time() - start_time
+        if elapsed_time >= 1.0:  # Update FPS every second
+            fps = frame_count / elapsed_time
+            frame_count = 0
+            start_time = time.time()
             
         # Convert frame to PIL Image
         pil_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -72,11 +86,15 @@ def analyze_webcam():
         except Exception as e:
             print("Error in OpenAI API call:", str(e))
             
+        # Add FPS text to the frame
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            
         # Display the frame
         cv2.imshow('Webcam Feed', frame)
         
-        # Break the loop on 'q' key press
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        # Break the loop on 'q' or 'ESC' key press
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q') or key == 27:  # 27 is the ESC key
             break
     
     # Release everything when job is finished
