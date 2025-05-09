@@ -52,6 +52,12 @@ Run the webcam detection version:
 python camera_test1.py
 ```
 
+### Integrated Card Counter with Camera 
+Run the integrated version with camera detection:
+```bash
+python CardCounterCam.py
+```
+
 ## Controls
 
 - Use mouse to select cards and actions in the GUI
@@ -59,6 +65,12 @@ python camera_test1.py
 - Use arrow keys to adjust deck count in GUI
 - Click "New Hand" to reset the current hand
 - Click "Reset Count" to reset the running count
+
+### Additional Controls for Integrated Version
+- Press 'C' to toggle camera on/off
+- Press 'P' to add the detected card to player hand
+- Press 'D' to set the detected card as dealer card
+- Click "Toggle Camera" to enable/disable the webcam
 
 ## License
 
