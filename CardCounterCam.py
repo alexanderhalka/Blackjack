@@ -140,6 +140,12 @@ class CardCounterCam:
         self.detected_card = None
         self.last_detected_card = None
         self.detection_confidence = "No detection"
+        self.detection_confirmed = False  # Flag to track if detection is confirmed
+        self.detection_stability_count = 0  # Counter for stable detections
+        self.last_detection_time = 0  # Time of last detection
+        self.detection_cooldown = 1.0  # Cooldown period in seconds
+        self.fps = 0  # Store FPS for display
+        self.api_processing = False  # Flag to prevent multiple API calls at once
         
         # Initialize OpenAI client
         self.client = OpenAI(api_key=api_key)
@@ -229,7 +235,7 @@ class CardCounterCam:
                 return value, f"{value} of {suit}"
             else:
                 # If we don't find a perfect match but the response contains a valid card value
-                for value in ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']:
+                for value in ['10', 'J', 'Q', 'K', 'A', '2', '3', '4', '5', '6', '7', '8', '9']:  # Check 10 first to avoid matching in "10" in other numbers
                     if value.lower() in response_text.lower():
                         return value, f"Detected: {response_text}"
                 
@@ -247,12 +253,22 @@ class CardCounterCam:
             self.camera_running = False
             return
             
+        # Set camera properties for better performance
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer for real-time processing
+            
         # Initialize variables
-        fps = 0
         frame_count = 0
         start_time = time.time()
         last_sent_time = 0
-        send_interval = 2.0  # seconds
+        send_interval = 1.0  # Seconds between API calls
+        last_detection = None
+        detection_count = 0
+        
+        # Start API processing thread
+        api_thread = None
         
         self.camera_running = True
         while self.camera_running:
@@ -265,61 +281,101 @@ class CardCounterCam:
             frame_count += 1
             elapsed_time = time.time() - start_time
             if elapsed_time >= 1.0:
-                fps = frame_count / elapsed_time
+                self.fps = frame_count / elapsed_time
                 frame_count = 0
                 start_time = time.time()
                 
-            # Resize frame for display
+            # Resize frame for display (smaller for better performance)
             resized_frame = cv2.resize(frame, (320, 240))
             
             # Convert frame for pygame display
             pygame_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-            pygame_frame = np.rot90(pygame_frame)  # Rotate because pygame and OpenCV have different orientations
-            pygame_frame = pygame.surfarray.make_surface(pygame_frame)
-            self.camera_surface = pygame_frame
+            # Rotate 90 degrees clockwise to match display orientation
+            pygame_frame = np.rot90(pygame_frame, k=1)
+            self.camera_surface = pygame.surfarray.make_surface(pygame_frame)
             
-            # Process for card detection
+            # Process for card detection in a separate thread to avoid blocking the main loop
             current_time = time.time()
-            if current_time - last_sent_time >= send_interval:
-                try:
-                    # Prepare image for API
-                    small_frame = cv2.resize(frame, (480, 360))
-                    pil_image = Image.fromarray(cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB))
-                    base64_image = encode_image_to_base64(pil_image)
-                    
-                    # Call OpenAI Vision API
-                    response = self.client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "text", 
-                                        "text": "Look at this image and identify if there is a playing card visible. If there is a card, respond with the card's value (2-10, J, Q, K, A) and suit (hearts, diamonds, clubs, spades) in the format 'value of suit' (e.g., '7 of hearts' or 'King of spades'). If no card is clearly visible, respond with 'No card detected'."
-                                    },
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{base64_image}"
-                                        }
-                                    }
-                                ]
-                            }
-                        ],
-                        max_tokens=20
-                    )
-                    
-                    # Parse response
-                    text = response.choices[0].message.content.strip()
-                    self.detected_card, self.detection_confidence = self.parse_card_from_response(text)
-                    last_sent_time = current_time
+            if current_time - last_sent_time >= send_interval and not self.api_processing:
+                self.api_processing = True
+                last_sent_time = current_time
+                
+                # Make a copy of the frame for the API thread
+                api_frame = frame.copy()
+                
+                # Process in a separate thread
+                def process_frame(frame):
+                    try:
+                        # Prepare image for API - use lower resolution for faster processing
+                        small_frame = cv2.resize(frame, (320, 240))
+                        pil_image = Image.fromarray(cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB))
+                        base64_image = encode_image_to_base64(pil_image)
                         
-                except Exception as e:
-                    self.detection_confidence = f"Error: {str(e)}"
+                        # Call OpenAI Vision API
+                        response = self.client.chat.completions.create(
+                            model="gpt-4o",
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "text", 
+                                            "text": "Look at this image and identify if there is a playing card visible. If there is a card, respond with the card's value (2-10, J, Q, K, A) and suit (hearts, diamonds, clubs, spades) in the format 'value of suit' (e.g., '7 of hearts' or 'King of spades'). If no card is clearly visible, respond with 'No card detected'."
+                                        },
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": f"data:image/jpeg;base64,{base64_image}"
+                                            }
+                                        }
+                                    ]
+                                }
+                            ],
+                            max_tokens=20
+                        )
+                        
+                        # Parse response
+                        text = response.choices[0].message.content.strip()
+                        card_value, confidence_text = self.parse_card_from_response(text)
+                        
+                        # Implement detection stability check
+                        nonlocal last_detection, detection_count
+                        if card_value == last_detection:
+                            detection_count += 1
+                        else:
+                            detection_count = 1
+                            last_detection = card_value
+                        
+                        # Only update detection if we have consistent readings or clear "no card"
+                        if detection_count >= 2 or card_value is None:
+                            self.detected_card = card_value
+                            self.detection_confidence = confidence_text
+                            
+                            # Set detection confirmed flag if we have a valid card
+                            if card_value is not None:
+                                self.detection_confirmed = True
+                                self.last_detection_time = time.time()
+                    
+                    except Exception as e:
+                        self.detection_confidence = f"Error: {str(e)}"
+                    
+                    finally:
+                        self.api_processing = False
+                
+                # Start the processing thread
+                api_thread = threading.Thread(target=process_frame, args=(api_frame,))
+                api_thread.daemon = True
+                api_thread.start()
+            
+            # Brief sleep to yield CPU time and improve responsiveness
+            time.sleep(0.001)
                     
         # Release camera
         cap.release()
+        
+        # Wait for API thread to complete if it's running
+        if api_thread and api_thread.is_alive():
+            api_thread.join(timeout=0.5)
 
     def toggle_camera(self):
         """Toggle camera on/off"""
@@ -342,25 +398,32 @@ class CardCounterCam:
 
     def handle_detected_card(self):
         """Process detected card from camera if available"""
-        if not self.detected_card or self.detected_card == self.last_detected_card:
+        # Skip if no detection or same as last processed card
+        if not self.detected_card or not self.detection_confirmed:
             return
             
-        self.last_detected_card = self.detected_card
+        # Reset confirmation flag
+        self.detection_confirmed = False
+        
+        # Store the card we're about to process
+        current_card = self.detected_card
+        self.last_detected_card = current_card
         
         # Add card based on selected action
         if self.input_mode == 'player':
-            self.player_cards.append(self.detected_card)
-            self.update_count(self.detected_card)
-            self.message = f"Added {self.detected_card} to player hand"
+            self.player_cards.append(current_card)
+            self.update_count(current_card)
+            self.message = f"Added {current_card} to player hand"
             self.message_timer = 90
         elif self.input_mode == 'dealer':
-            self.dealer_up_card = self.detected_card
-            self.update_count(self.detected_card)
-            self.message = f"Set dealer up card to {self.detected_card}"
+            # For dealer, replace the current card
+            self.dealer_up_card = current_card
+            self.update_count(current_card)
+            self.message = f"Set dealer up card to {current_card}"
             self.message_timer = 90
         else:
             # Default to adding to player hand if no mode selected
-            self.message = f"Detected {self.detected_card}. Select 'Add Player Card' or 'Set Dealer Card'"
+            self.message = f"Detected {current_card}. Select 'Add Player Card' or 'Set Dealer Card'"
             self.message_timer = 120
 
     def handle_events(self):
@@ -379,11 +442,11 @@ class CardCounterCam:
                     self.true_count = self.running_count / self.decks_remaining
                 elif event.key == pygame.K_c:
                     self.toggle_camera()
-                elif event.key == pygame.K_p and self.detected_card:
+                elif event.key == pygame.K_p and self.detected_card and self.detection_confirmed:
                     # Shortcut to add detected card to player hand
                     self.input_mode = 'player'
                     self.handle_detected_card()
-                elif event.key == pygame.K_d and self.detected_card:
+                elif event.key == pygame.K_d and self.detected_card and self.detection_confirmed:
                     # Shortcut to set detected card as dealer card
                     self.input_mode = 'dealer'
                     self.handle_detected_card()
@@ -451,8 +514,10 @@ class CardCounterCam:
                             self.toggle_camera()
                         break
         
-        # Process detected card
-        if self.camera_enabled and self.detected_card:
+        # Process detected card with cooldown to prevent accidental additions
+        current_time = time.time()
+        if self.camera_enabled and self.detected_card and self.detection_confirmed and \
+           (current_time - self.last_detection_time) > self.detection_cooldown:
             self.handle_detected_card()
 
     def draw_button(self, rect, text, color=None, text_color=None, highlight=False):
@@ -514,8 +579,12 @@ class CardCounterCam:
         
         # Draw camera feed and status
         if self.camera_enabled and self.camera_surface:
-            # Draw camera feed on the right side
+            # Draw camera feed on the right side (no flip, already rotated correctly)
             self.screen.blit(self.camera_surface, (650, 100))
+            
+            # Draw FPS text using Pygame (top-left of camera feed)
+            fps_text = self.small_font.render(f"FPS: {self.fps:.1f}", True, self.colors["GREEN"])
+            self.screen.blit(fps_text, (650 + 10, 100 + 10))
             
             # Draw a border around the camera feed
             pygame.draw.rect(self.screen, self.colors["WHITE"], (650, 100, 320, 240), 2)
@@ -527,8 +596,12 @@ class CardCounterCam:
             detection_text = self.normal_font.render(self.detection_confidence, True, self.colors["YELLOW"])
             self.screen.blit(detection_text, (650, 390))
             
-            # Show input mode
-            mode_text = self.small_font.render(f"Mode: {'Player Card' if self.input_mode == 'player' else 'Dealer Card' if self.input_mode == 'dealer' else 'None'}", True, self.colors["LIGHT_BLUE"])
+            # Show input mode, confirmation status and FPS
+            mode_text = self.small_font.render(
+                f"Mode: {'Player Card' if self.input_mode == 'player' else 'Dealer Card' if self.input_mode == 'dealer' else 'None'} | " +
+                f"Confirmed: {'Yes' if self.detection_confirmed else 'No'}", 
+                True, self.colors["LIGHT_BLUE"]
+            )
             self.screen.blit(mode_text, (650, 430))
         else:
             # Display camera status
